@@ -16,9 +16,23 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 try:
-    from ..utils.audio_utils import tensor_to_comfyui_audio, prepare_audio_for_cosyvoice, cleanup_temp_file
+    from ..utils.audio_utils import (
+        tensor_to_comfyui_audio, 
+        prepare_audio_for_cosyvoice, 
+        cleanup_temp_file,
+        time_stretch,
+        tensor_to_audiosegment,
+        audiosegment_to_tensor
+    )
 except (ImportError, ValueError):
-    from utils.audio_utils import tensor_to_comfyui_audio, prepare_audio_for_cosyvoice, cleanup_temp_file
+    from utils.audio_utils import (
+        tensor_to_comfyui_audio, 
+        prepare_audio_for_cosyvoice, 
+        cleanup_temp_file,
+        time_stretch,
+        tensor_to_audiosegment,
+        audiosegment_to_tensor
+    )
 
 # ComfyUI progress bar
 import comfy.utils
@@ -29,8 +43,8 @@ class FL_CosyVoice3_VoiceConversion:
     Voice conversion - convert source voice to target voice
     """
 
-    RETURN_TYPES = ("AUDIO",)
-    RETURN_NAMES = ("audio",)
+    RETURN_TYPES = ("AUDIO", "AUDIO", "AUDIO")
+    RETURN_NAMES = ("converted_audio", "aligned_audio", "original_audio")
     FUNCTION = "convert_voice"
     CATEGORY = "🔊FL CosyVoice3/Synthesis"
 
@@ -41,11 +55,11 @@ class FL_CosyVoice3_VoiceConversion:
                 "model": ("COSYVOICE_MODEL", {
                     "description": "CosyVoice model from ModelLoader"
                 }),
-                "source_audio": ("AUDIO", {
-                    "description": "Source audio to convert"
+                "original_audio": ("AUDIO", {
+                    "description": "Original audio (Content)"
                 }),
-                "target_audio": ("AUDIO", {
-                    "description": "Target voice reference"
+                "reference_audio": ("AUDIO", {
+                    "description": "Reference audio (Timbre/Speaker)"
                 }),
                 "speed": ("FLOAT", {
                     "default": 1.0,
@@ -53,6 +67,10 @@ class FL_CosyVoice3_VoiceConversion:
                     "max": 2.0,
                     "step": 0.1,
                     "description": "Speech speed multiplier"
+                }),
+                "alignment": ("BOOLEAN", {
+                    "default": False,
+                    "description": "Align generated audio duration to original"
                 }),
             },
             "optional": {
@@ -68,28 +86,35 @@ class FL_CosyVoice3_VoiceConversion:
     def convert_voice(
         self,
         model: Dict[str, Any],
-        source_audio: Dict[str, Any],
-        target_audio: Dict[str, Any],
+        original_audio: Dict[str, Any],
+        reference_audio: Dict[str, Any],
         speed: float = 1.0,
+        alignment: bool = False,
         seed: int = -1
-    ) -> Tuple[Dict[str, Any]]:
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         """
         Convert source voice to target voice
-
+        
         Args:
             model: CosyVoice model info dict
-            source_audio: Source audio to convert
-            target_audio: Target voice reference
+            original_audio: Original audio (Content)
+            reference_audio: Reference audio (Timbre)
             speed: Speech speed
+            alignment: Whether to align duration
             seed: Random seed
 
         Returns:
-            Tuple containing audio dict
+            Tuple containing (converted, aligned, original)
         """
         print(f"\n{'='*60}")
         print(f"[FL CosyVoice3 VC] Converting voice...")
         print(f"[FL CosyVoice3 VC] Speed: {speed}x")
+        print(f"[FL CosyVoice3 VC] Alignment: {alignment}")
         print(f"{'='*60}\n")
+
+        # Map new input names to internal variables
+        source_audio = original_audio
+        target_audio = reference_audio
 
         # Check audio durations BEFORE try block so errors propagate to ComfyUI
         source_waveform = source_audio['waveform']
@@ -143,10 +168,10 @@ class FL_CosyVoice3_VoiceConversion:
                 raise RuntimeError("Model does not support voice conversion")
 
             # Prepare source and target audio - use model's sample rate
-            print(f"[FL CosyVoice3 VC] Preparing source audio ({source_duration:.1f}s)...")
+            print(f"[FL CosyVoice3 VC] Preparing original audio (content) ({source_duration:.1f}s)...")
             _, _, source_temp = prepare_audio_for_cosyvoice(source_audio, target_sample_rate=sample_rate)
 
-            print(f"[FL CosyVoice3 VC] Preparing target audio ({target_duration:.1f}s)...")
+            print(f"[FL CosyVoice3 VC] Preparing reference audio (timbre) ({target_duration:.1f}s)...")
             _, _, target_temp = prepare_audio_for_cosyvoice(target_audio, target_sample_rate=sample_rate)
 
             pbar.update_absolute(1, 3)
@@ -187,7 +212,27 @@ class FL_CosyVoice3_VoiceConversion:
             pbar.update_absolute(2, 3)
 
             # Convert to ComfyUI AUDIO format
-            audio = tensor_to_comfyui_audio(waveform, sample_rate)
+            converted_audio = tensor_to_comfyui_audio(waveform, sample_rate)
+            
+            # Handle Alignment
+            aligned_audio = None
+            if alignment:
+                print(f"[FL CosyVoice3 VC] Aligning duration...")
+                # Convert both to AudioSegment
+                gen_seg = tensor_to_audiosegment(waveform, sample_rate)
+                # Need original source as AudioSegment
+                orig_wf = source_audio['waveform']
+                orig_sr = source_audio['sample_rate']
+                src_seg = tensor_to_audiosegment(orig_wf, orig_sr)
+                
+                if len(src_seg) > 0 and len(gen_seg) > 0:
+                    ratio = len(gen_seg) / len(src_seg)
+                    aligned_seg = time_stretch(gen_seg, ratio)
+                    
+                    # Convert back
+                    aligned_wf, aligned_sr = audiosegment_to_tensor(aligned_seg)
+                    aligned_audio = tensor_to_comfyui_audio(aligned_wf, aligned_sr)
+                    print(f"[FL CosyVoice3 VC] Aligned duration: {len(aligned_seg)/1000.0:.2f}s (Original: {len(src_seg)/1000.0:.2f}s)")
 
             duration = waveform.shape[-1] / sample_rate
 
@@ -199,7 +244,7 @@ class FL_CosyVoice3_VoiceConversion:
             print(f"[FL CosyVoice3 VC] Sample rate: {sample_rate} Hz")
             print(f"{'='*60}\n")
 
-            return (audio,)
+            return (converted_audio, aligned_audio, original_audio)
 
         except Exception as e:
             error_msg = f"Error in voice conversion: {str(e)}"
@@ -214,7 +259,7 @@ class FL_CosyVoice3_VoiceConversion:
                 "waveform": torch.zeros(1, 1, 22050),
                 "sample_rate": 22050
             }
-            return (empty_audio,)
+            return (empty_audio, None, original_audio)
 
         finally:
             # Clean up temp files

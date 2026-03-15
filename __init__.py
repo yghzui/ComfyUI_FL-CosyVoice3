@@ -16,6 +16,7 @@ from .nodes.cross_lingual import FL_CosyVoice3_CrossLingual
 from .nodes.voice_conversion import FL_CosyVoice3_VoiceConversion
 from .nodes.audio_crop import FL_CosyVoice3_AudioCrop
 from .nodes.dialog import FL_CosyVoice3_Dialog
+from .nodes.audio_tools import FL_Audio_Split, FL_Audio_Align, FL_Audio_Merge
 
 # Node class mappings
 NODE_CLASS_MAPPINGS = {
@@ -25,6 +26,9 @@ NODE_CLASS_MAPPINGS = {
     "FL_CosyVoice3_VoiceConversion": FL_CosyVoice3_VoiceConversion,
     "FL_CosyVoice3_AudioCrop": FL_CosyVoice3_AudioCrop,
     "FL_CosyVoice3_Dialog": FL_CosyVoice3_Dialog,
+    "FL_Audio_Split": FL_Audio_Split,
+    "FL_Audio_Align": FL_Audio_Align,
+    "FL_Audio_Merge": FL_Audio_Merge,
 }
 
 # Node display name mappings
@@ -35,6 +39,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FL_CosyVoice3_VoiceConversion": "FL CosyVoice3 Voice Conversion",
     "FL_CosyVoice3_AudioCrop": "FL CosyVoice3 Audio Crop",
     "FL_CosyVoice3_Dialog": "FL CosyVoice3 Dialog",
+    "FL_Audio_Split": "FL Audio Split",
+    "FL_Audio_Align": "FL Audio Align",
+    "FL_Audio_Merge": "FL Audio Merge",
 }
 
 # ASCII art banner

@@ -8,7 +8,14 @@ import torchaudio
 import soundfile as sf
 import tempfile
 import os
+import numpy as np
 from typing import Dict, Any, Tuple, Optional
+
+try:
+    from pydub import AudioSegment
+except ImportError:
+    print("pydub not installed, some features may not work")
+
 
 
 def comfyui_audio_to_tensor(audio: Dict[str, Any]) -> Tuple[torch.Tensor, int]:
@@ -282,3 +289,135 @@ def cleanup_temp_file(temp_path: Optional[str]):
             os.unlink(temp_path)
         except:
             pass
+
+
+def audiosegment_to_tensor(segment: 'AudioSegment') -> Tuple[torch.Tensor, int]:
+    """
+    Convert pydub AudioSegment to tensor and sample rate
+    """
+    channel_count = segment.channels
+    sample_width = segment.sample_width
+    frame_rate = segment.frame_rate
+    
+    # Get raw data
+    raw_data = segment.raw_data
+    
+    # Convert to numpy array
+    if sample_width == 2:
+        dtype = np.int16
+    elif sample_width == 4:
+        dtype = np.int32
+    elif sample_width == 1:
+        dtype = np.int8
+    else:
+        raise ValueError(f"Unsupported sample width: {sample_width}")
+        
+    audio_array = np.frombuffer(raw_data, dtype=dtype)
+    
+    # Reshape if stereo
+    if channel_count > 1:
+        audio_array = audio_array.reshape((-1, channel_count)).T
+    else:
+        audio_array = audio_array.reshape((1, -1))
+        
+    # Normalize to float -1..1
+    if sample_width == 2:
+        audio_tensor = torch.from_numpy(audio_array).float() / 32768.0
+    elif sample_width == 4:
+        audio_tensor = torch.from_numpy(audio_array).float() / 2147483648.0
+    elif sample_width == 1:
+        audio_tensor = torch.from_numpy(audio_array).float() / 128.0
+        
+    # Add batch dimension [1, channels, samples]
+    if audio_tensor.ndim == 2:
+        audio_tensor = audio_tensor.unsqueeze(0)
+        
+    return audio_tensor, frame_rate
+
+
+def tensor_to_audiosegment(waveform: torch.Tensor, sample_rate: int) -> 'AudioSegment':
+    """
+    Convert tensor to pydub AudioSegment
+    """
+    # Ensure CPU
+    if waveform.device != torch.device('cpu'):
+        waveform = waveform.cpu()
+        
+    # Remove batch dim
+    if waveform.ndim == 3:
+        waveform = waveform.squeeze(0)
+        
+    # Convert to numpy [channels, samples]
+    audio_np = waveform.numpy()
+    
+    # Convert to int16 PCM
+    audio_int16 = (audio_np * 32767).astype(np.int16)
+    
+    # Transpose to [samples, channels] for pydub
+    if audio_int16.ndim == 2:
+        audio_int16 = audio_int16.T
+        
+    # Create AudioSegment
+    return AudioSegment(
+        audio_int16.tobytes(),
+        frame_rate=sample_rate,
+        sample_width=2,
+        channels=waveform.shape[0]
+    )
+
+
+def time_stretch(seg: 'AudioSegment', ratio: float) -> 'AudioSegment':
+    """
+    Time stretch an AudioSegment using ffmpeg atempo filter
+    """
+    if abs(ratio - 1.0) <= 0.001:
+        return seg
+        
+    import uuid
+    import subprocess
+    
+    unique_id = uuid.uuid4().hex
+    temp_dir = tempfile.gettempdir()
+    tin = os.path.join(temp_dir, f"ts_in_{unique_id}.wav")
+    tout = os.path.join(temp_dir, f"ts_out_{unique_id}.wav")
+    
+    try:
+        seg.export(tin, format="wav")
+        
+        # atempo filter supports 0.5 to 2.0
+        filters = []
+        r = ratio
+        while r > 2.0:
+            filters.append("atempo=2.0")
+            r /= 2.0
+        while r < 0.5:
+            filters.append("atempo=0.5")
+            r /= 0.5
+        filters.append(f"atempo={r}")
+        filter_str = ",".join(filters)
+        
+        cmd = ["ffmpeg", "-y", "-i", tin, "-filter:a", filter_str, tout]
+        
+        # Hide ffmpeg output on windows
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
+        
+        if os.path.exists(tout):
+            result = AudioSegment.from_file(tout)
+            return result
+        else:
+            return seg
+            
+    except Exception as e:
+        print(f"[Audio Utils] Time stretch error: {e}")
+        return seg
+    finally:
+        # clean up
+        try:
+            if os.path.exists(tin): os.remove(tin)
+            if os.path.exists(tout): os.remove(tout)
+        except: pass
